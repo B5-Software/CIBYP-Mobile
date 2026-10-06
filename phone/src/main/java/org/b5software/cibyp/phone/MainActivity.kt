@@ -290,6 +290,6 @@ class MainActivity : ComponentActivity() {
     val todos by repo.todos.collectAsState(); val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { runCatching { repo.refreshNow() }.onFailure { repo.error.value = it.message.orEmpty() } }
     LazyColumn(contentPadding = PaddingValues(16.dp)) { items(todos, key = { it.get("id").toString() }) { todo ->
-        ListItem(headlineContent = { Text(todo.optString("text")) }, leadingContent = { Checkbox(todo.optBoolean("done"), { repo.run { repo.rpc("toggleTodo", JSONArray().put(todo.get("id"))); repo.refreshNow() } }) })
+        ListItem(headlineContent = { Text(todo.optString("text")) }, trailingContent = { Switch(todo.optBoolean("done"), { repo.run { repo.rpc("toggleTodo", JSONArray().put(todo.get("id"))); repo.refreshNow() } }) })
     } }
 }
