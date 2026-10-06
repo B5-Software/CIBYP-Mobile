@@ -22,23 +22,27 @@ class WatchBridgeService : WearableListenerService() {
                 WatchProtocol.validate(method, args)
                 val device = repo.devices.value.find { it.id == request.getString("device") } ?: error("Unknown device")
                 check(repo.active.value != null) { "Connect from the phone first" }
-                var result = repo.client(device).rpc(method, args)
+                var result = if (method == "appearance:theme") JSONObject().put("theme", repo.themeFor(device)) else repo.client(device).rpc(method, args)
+                if (method == "listSessions" && result is JSONArray) result = WatchPayload.sessions(result)
                 if (method == "snapshot" && result is JSONObject) result = JSONObject().put("sessions", result.array("sessions")).put("boot", result.optJSONObject("boot")).put("platform", result.optString("platform"))
                 // Data Layer has a bounded payload. The watch shows recent output; the phone keeps the full transcript.
                 if (method == "getSessionDetails" && result is JSONObject) {
-                    val recent = result.array("messages").objects().takeLast(12).map { JSONObject(it.toString()).put("content", it.optString("content").takeLast(2500)).put("reasoning", "") }
-                    result.put("messages", JSONArray(recent))
+                    result = WatchPayload.details(result)
                 }
                 response.put("result", result ?: JSONObject.NULL)
             }.onFailure { response.put("error", it.message) }
-            Wearable.getMessageClient(this@WatchBridgeService).sendMessage(event.sourceNodeId, WatchProtocol.RESPONSE, response.toString().toByteArray()).await()
+            var bytes = response.toString().toByteArray()
+            if (bytes.size > 48000) bytes = JSONObject().put("id", request.optString("id")).put("error", "This response is too large for the watch. Open it on your phone.").toString().toByteArray()
+            try { Wearable.getMessageClient(this@WatchBridgeService).sendMessage(event.sourceNodeId, WatchProtocol.RESPONSE, bytes).await() }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { /* Phone/watch disconnected; caller shows its bounded timeout. */ }
         }
     }
     override fun onDestroy() { scope.cancel(); super.onDestroy() }
     companion object {
-        suspend fun publish(context: Context, devices: List<Device>) {
+        suspend fun publish(context: Context, devices: List<Device>, themes: Map<String, JSONObject>) {
             val data = PutDataMapRequest.create(WatchProtocol.DEVICES)
-            data.dataMap.putString("devices", JSONArray(devices.map { it.publicJson() }).toString())
+            data.dataMap.putString("devices", JSONArray(devices.map { it.publicJson().put("theme", themes[it.id] ?: JSONObject()) }).toString())
             data.dataMap.putLong("revision", System.currentTimeMillis())
             runCatching { Wearable.getDataClient(context).putDataItem(data.asPutDataRequest().setUrgent()).await() }
         }

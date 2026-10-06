@@ -46,9 +46,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); enableEdgeToEdge()
         setContent {
-            val dark = isSystemInDarkTheme()
-            val colors = if (Build.VERSION.SDK_INT >= 31) { if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this) } else if (dark) darkColorScheme() else lightColorScheme()
-            MaterialTheme(colorScheme = colors) { Surface { RemoteUi((application as RemoteApp).remote) {
+            val repo = (application as RemoteApp).remote
+            val appearance by repo.appearance.collectAsState()
+            RemotePhoneTheme(appearance) { Surface { RemoteUi(repo) {
                 if (Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
                 startForegroundService(Intent(this, ConnectionService::class.java))
             } } }
@@ -108,7 +108,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         item { FilledTonalButton(onClick = { editing = null; adding = true; name = ""; address = ""; password = ""; code = "" }) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text(tr("添加电脑", "Add desktop")) } }
-        item { OutlinedTextField(bridge, { bridge = it }, label = { Text(tr("可选网桥", "Optional bridges")) }, supportingText = { Text("obfs4 / snowflake / webtunnel") }, minLines = 3, modifier = Modifier.fillMaxWidth()); TextButton(onClick = { repo.bridges = bridge; repo.stop() }) { Text(tr("保存网桥并断开连接", "Save bridges and disconnect")) } }
+        item {
+            OutlinedTextField(bridge, { bridge = it }, label = { Text(tr("可选网桥", "Optional bridges")) }, supportingText = { Text("obfs4 / snowflake / webtunnel / meek (meek_lite)") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+            TextButton(onClick = { bridge = TorBridges.DEFAULT_MEEK }, enabled = !busy) { Text(tr("使用内置 meek 网桥", "Use built-in meek bridge")) }
+            TextButton(onClick = {
+                runCatching { TorBridges.parse(bridge).joinToString("\n") { it.line } }
+                    .onSuccess { repo.bridges = it; repo.stop(); repo.error.value = "" }
+                    .onFailure { repo.error.value = it.message.orEmpty() }
+            }, enabled = !busy) { Text(tr("保存网桥并断开连接", "Save bridges and disconnect")) }
+            if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error)
+        }
         item { Text(tr("绑定的手表", "Watch access"), style = MaterialTheme.typography.titleMedium) }
         if (watches.isEmpty()) item { Text(tr("先在系统中配对手表，并在手表安装 CIBYP。", "Pair your watch in Android and install CIBYP on it.")) }
         items(watches) { node -> ListItem(headlineContent = { Text(node.displayName) }, supportingContent = { Text(tr("共享设备列表，命令通过此手机转发", "Shares devices; requests are forwarded by this phone")) }, trailingContent = { Switch(checked = node.id in trusted, onCheckedChange = { repo.trust(node.id, it); repo.publishDevices() }) }) }
@@ -189,7 +198,7 @@ class MainActivity : ComponentActivity() {
                     if (!user) ChatAvatar(profile, false, babe, accent)
                     Column(Modifier.weight(1f, fill = false).widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = if (user) Alignment.End else Alignment.Start) {
                         if (message.optString("content").isNotEmpty() || message.optString("reasoning").isNotEmpty()) Surface(shape = MaterialTheme.shapes.large, color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer) { Column(Modifier.padding(14.dp)) {
-                            if (message.optString("reasoning").isNotEmpty()) { Text(message.optString("reasoning"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall); Spacer(Modifier.height(12.dp)) }
+                            if (message.optString("reasoning").isNotEmpty()) { Text(if (message.optString("reasoningKind") == "summary") tr("推理摘要", "Reasoning summary") else tr("推理内容", "Reasoning"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall); Text(message.optString("reasoning"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall); Spacer(Modifier.height(12.dp)) }
                             SelectionContainer { Text(message.optString("content"), style = MaterialTheme.typography.bodyMedium) }
                         } }
                         message.array("attachments").objects().forEach { file -> AttachmentCard(file.optString("name"), file.optString("type"), file.optLong("size", -1), onClick = {

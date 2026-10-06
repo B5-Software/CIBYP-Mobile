@@ -8,11 +8,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.wear.compose.material3.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -29,45 +31,90 @@ class MainActivity : ComponentActivity() {
     private lateinit var client: PhoneClient
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); client = PhoneClient(this)
-        setContent { MaterialTheme { WatchUi(client) } }
+        setContent { val appearance by client.appearance.collectAsState(); RemoteWatchTheme(appearance) { WatchUi(client) } }
     }
     override fun onDestroy() { client.close(); super.onDestroy() }
 }
 
-@Composable private fun WatchUi(client: PhoneClient) {
+@Composable internal fun WatchUi(client: WatchConnection) {
     val devices by client.devices.collectAsState(); val scope = rememberCoroutineScope()
     var device by remember { mutableStateOf("") }; var session by remember { mutableStateOf("") }
     var sessions by remember { mutableStateOf<List<JSONObject>>(emptyList()) }; var transcript by remember { mutableStateOf(JSONObject()) }
     var page by remember { mutableStateOf("devices") }; var error by remember { mutableStateOf("") }; var usage by remember { mutableStateOf(JSONObject()) }; var update by remember { mutableStateOf(JSONObject()) }; var todos by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
-    fun action(block: suspend () -> Unit) { scope.launch { try { block() } catch (cancelled: CancellationException) { throw cancelled } catch (failure: Exception) { error = failure.message.orEmpty() } } }
-    suspend fun refresh() { sessions = (client.rpc(device, "listSessions") as? JSONArray)?.objects().orEmpty(); if (session.isNotEmpty()) transcript = client.rpc(device, "getSessionDetails", JSONArray().put(session)) as? JSONObject ?: JSONObject() }
+    var working by remember { mutableStateOf(false) }
+    val messages = remember(transcript) { transcript.array("messages").objects().filter { it.optString("role") != "system" } }
+    fun action(block: suspend () -> Unit) {
+        if (working) return
+        scope.launch { working = true; try { block() } catch (cancelled: CancellationException) { throw cancelled } catch (failure: Exception) { error = failure.message.orEmpty() } finally { working = false } }
+    }
+    suspend fun refresh(targetPage: String = page) {
+        val target = device; val key = session
+        when (targetPage) {
+            "sessions" -> {
+                val next = (client.rpc(target, "listSessions") as? JSONArray)?.objects().orEmpty()
+                if (device == target && sessions.toString() != next.toString()) sessions = next
+            }
+            "chat" -> if (key.isNotEmpty()) {
+                val next = client.rpc(target, "getSessionDetails", JSONArray().put(key)) as? JSONObject ?: JSONObject()
+                if (device == target && session == key && transcript.toString() != next.toString()) transcript = next
+            }
+            "todos" -> {
+                val next = (client.rpc(target, "getTodos") as? JSONArray)?.objects().orEmpty()
+                if (device == target && todos.toString() != next.toString()) todos = next
+            }
+            "usage" -> {
+                val next = client.rpc(target, "getSubscriptionUsage", JSONArray().put(key)) as? JSONObject ?: JSONObject()
+                if (device == target && usage.toString() != next.toString()) usage = next
+            }
+        }
+        if (targetPage in setOf("sessions", "install")) {
+            val next = client.rpc(target, "ipc:invoke", JSONArray().put("updates:status")) as? JSONObject ?: JSONObject()
+            if (device == target && update.toString() != next.toString()) update = next
+        }
+    }
     val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val text = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: return@rememberLauncherForActivityResult
         action { if (session.isEmpty()) session = (client.rpc(device, "createSession", JSONArray().put(JSONObject().put("mode", "chat"))) as JSONObject).getString("key"); client.rpc(device, "sendMessage", JSONArray().put(session).put(text)); refresh() }
     }
     LaunchedEffect(Unit) { runCatching { client.start() }.onFailure { error = it.message.orEmpty() } }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(device, page, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { if (device.isNotEmpty()) while (true) { try { refresh(); update = client.rpc(device, "ipc:invoke", JSONArray().put("updates:status")) as? JSONObject ?: JSONObject() } catch (cancelled: CancellationException) { throw cancelled } catch (failure: Exception) { error = failure.message.orEmpty() }; delay(2000) } } }
-    BackHandler(page != "devices") { page = if (page == "sessions") "devices" else "sessions"; error = "" }
-    Box(Modifier.fillMaxSize()) {
+    LaunchedEffect(device, page, session, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+        if (device.isNotEmpty() && page != "devices") while (true) {
+            try { if (!working) refresh() } catch (cancelled: CancellationException) { throw cancelled } catch (failure: Exception) { error = failure.message.orEmpty() }
+            // Tor calls can take seconds. Wait after completion, never overlap
+            // refreshes; the Data Layer pushes appearance changes separately.
+            delay(if (page == "chat") 10000 else 30000)
+        }
+    } }
+    BackHandler(page != "devices") { page = if (page == "sessions") "devices" else "sessions"; error = ""; if (page == "devices") client.selectDevice("") }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 38.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             item { Text("CIBYP", style = MaterialTheme.typography.titleMedium) }
             if (error.isNotEmpty()) item { Text(error); Button(onClick = { error = "" }) { Text(tr("关闭", "Dismiss")) } }
             when (page) {
                 "devices" -> {
                     if (devices.isEmpty()) item { Text(tr("在手机上添加电脑并绑定此手表。无需扫码。", "Add desktops and approve this watch on your phone. No camera needed.")) }
-                    items(devices, key = { it.id }) { entry -> Button(onClick = { device = entry.id; action { refresh(); page = "sessions" } }) { Text(entry.name) } }
+                    items(devices, key = { it.id }) { entry -> Button(enabled = !working, onClick = { device = entry.id; session = ""; transcript = JSONObject(); sessions = emptyList(); client.selectDevice(device); action { client.rpc(device, "appearance:theme"); refresh("sessions"); page = "sessions" } }) { Text(entry.name, maxLines = 2, overflow = TextOverflow.Ellipsis) } }
                 }
                 "sessions" -> {
-                    item { Button(onClick = { action { session = (client.rpc(device, "createSession", JSONArray().put(JSONObject().put("mode", "chat"))) as JSONObject).getString("key"); refresh(); page = "chat" } }) { Text(tr("新对话", "New chat")) } }
-                    items(sessions) { entry -> Button(onClick = { session = entry.getString("key"); action { refresh(); page = "chat" } }) { Text(entry.optString("title").ifEmpty { "New" }) } }
+                    item { Button(enabled = !working, onClick = { action { session = (client.rpc(device, "createSession", JSONArray().put(JSONObject().put("mode", "chat"))) as JSONObject).getString("key"); refresh("chat"); page = "chat" } }) { Text(tr("新对话", "New chat")) } }
+                    items(sessions, key = { it.optString("key") }) { entry -> Button(enabled = !working, onClick = { session = entry.getString("key"); action { refresh("chat"); page = "chat" } }) { Text(entry.optString("title").ifEmpty { tr("新对话", "New") }, maxLines = 2, overflow = TextOverflow.Ellipsis) } }
                     item { Button(onClick = { action { todos = (client.rpc(device, "getTodos") as? JSONArray)?.objects().orEmpty(); page = "todos" } }) { Text(tr("待办", "Todos")) } }
                     item { Button(onClick = { action { usage = client.rpc(device, "getSubscriptionUsage", JSONArray().put(session)) as? JSONObject ?: JSONObject(); page = "usage" } }) { Text(tr("用量", "Usage")) } }
                     item { Button(onClick = { action { client.rpc(device, "ipc:invoke", JSONArray().put("updates:start")) } }) { Text("/update") } }
                     if (update.optString("phase") == "ready") item { Button(onClick = { page = "install" }) { Text(tr("重启安装", "Install update")) } }
                 }
                 "chat" -> {
-                    items(transcript.array("messages").objects().filter { it.optString("role") != "system" }) { message -> Text(message.optString("content")) }
+                    items(messages, key = { it.optString("id") }, contentType = { "message" }) { message -> Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer, androidx.compose.foundation.shape.RoundedCornerShape(16.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(if (message.optString("role") == "user") tr("你", "You") else "AI", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(message.optString("content"), style = MaterialTheme.typography.bodyMedium)
+                        if (message.optString("reasoningSummary").isNotEmpty()) {
+                            Text(tr("推理摘要", "Reasoning summary"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(message.optString("reasoningSummary"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        for (file in message.array("attachments").objects()) Text("▣ " + file.optString("name"), style = MaterialTheme.typography.bodySmall)
+                        if (message.optBoolean("truncated")) Text(tr("完整内容请在手机查看", "Open the phone for the full message"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } }
                     val pending = transcript.optJSONObject("pendingInteraction")
                     if (pending != null) {
                         item { Text(tr("需要你的决定，请查看手机上的完整请求。", "Decision needed. Review the complete request on your phone.")) }

@@ -22,9 +22,9 @@ class Backend(val device: Device, socksPort: Int? = null) {
         connectTimeout(60, TimeUnit.SECONDS); readTimeout(0, TimeUnit.MILLISECONDS)
         followRedirects(false); followSslRedirects(false)
     }.build()
-    var token: String = device.token
-    private var socket: WebSocket? = null
-    private var sequence: Long = 0
+    @Volatile var token: String = device.token
+    @Volatile private var socket: WebSocket? = null
+    @Volatile private var sequence: Long = 0
     private val clientId = UUID.randomUUID().toString()
     private val serial = AtomicInteger()
 
@@ -54,20 +54,22 @@ class Backend(val device: Device, socksPort: Int? = null) {
         sequence = value.optLong("sequence"); return value
     }
     fun subscribe(onEvent: (JSONObject) -> Unit, onClosed: (Boolean) -> Unit) {
-        socket?.cancel()
+        val previous = socket; socket = null; previous?.cancel()
         val address = device.url.replaceFirst("http", "ws") + "/api/events?after=$sequence"
         socket = client.newWebSocket(Request.Builder().url(address).header("Authorization", "Bearer $token").build(), object : WebSocketListener() {
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (socket !== webSocket) return
                 val value = runCatching { JSONObject(text) }.getOrNull() ?: return
-                if (value.has("sequence")) {
+                if (value.optString("type") == "reset") sequence = value.optLong("sequence", 0)
+                else if (value.has("sequence")) {
                     if (value.getLong("sequence") <= sequence) return
                     sequence = value.getLong("sequence")
                 }
                 onEvent(value)
             }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { onClosed(response?.code == 401) }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { onClosed(code == 1008) }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { if (socket === webSocket) onClosed(response?.code == 401) }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { if (socket === webSocket) onClosed(code == 1008) }
         })
     }
-    fun close() { socket?.cancel(); socket = null; client.dispatcher.cancelAll(); client.connectionPool.evictAll() }
+    fun close() { val previous = socket; socket = null; previous?.cancel(); client.dispatcher.cancelAll(); client.connectionPool.evictAll() }
 }

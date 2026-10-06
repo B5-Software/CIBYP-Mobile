@@ -33,7 +33,7 @@ object WatchProtocol {
     const val REQUEST = "/cibyp/request"
     const val RESPONSE = "/cibyp/response"
     const val DEVICES = "/cibyp/devices"
-    val methods = setOf("snapshot", "listSessions", "createSession", "getSessionDetails", "getStats", "getSubscriptionUsage", "sendMessage", "stop", "getTodos", "toggleTodo", "respond", "answerQuestions")
+    val methods = setOf("appearance:theme", "snapshot", "listSessions", "createSession", "getSessionDetails", "getStats", "getSubscriptionUsage", "sendMessage", "stop", "getTodos", "toggleTodo", "respond", "answerQuestions")
     fun validate(method: String, args: JSONArray) {
         require(method in methods || (method == "ipc:invoke" && args.optString(0) in setOf("updates:start", "updates:status", "updates:install"))) { "Unsupported watch operation" }
         require(args.toString().length < 48000) { "Watch request too large" }
