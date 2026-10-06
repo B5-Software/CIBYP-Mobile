@@ -32,8 +32,12 @@ internal suspend fun imageBitmap(source: String): ImageBitmap? = withContext(Dis
         val data = if (source.startsWith("data:")) Base64.decode(source.substringAfter(','), Base64.DEFAULT) else null
         if (source.startsWith("<") || source.startsWith("data:image/svg+xml")) {
             val svg = SVG.getFromString(data?.toString(Charsets.UTF_8) ?: source)
+            // The source's width/height (100 px for built-in frames) must fill the
+            // raster viewport; otherwise it occupies only the top-left 100/192.
+            svg.setDocumentWidth(192f)
+            svg.setDocumentHeight(192f)
             Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888).also { bitmap ->
-                android.graphics.Canvas(bitmap).drawPicture(svg.renderToPicture(192, 192))
+                svg.renderToCanvas(android.graphics.Canvas(bitmap))
             }.asImageBitmap()
         } else if (data != null) {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -51,7 +55,11 @@ internal suspend fun imageBitmap(source: String): ImageBitmap? = withContext(Dis
     val overlay by produceState<ImageBitmap?>(null, frame) { value = imageBitmap(frame) }
     val color = runCatching { Color(android.graphics.Color.parseColor(accent)) }.getOrElse { MaterialTheme.colorScheme.primary }
     Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh).border(1.5.dp, color, CircleShape), contentAlignment = Alignment.Center) {
+        // Frames use a centered 100×100 viewBox with a 76% inner opening.
+        // Match the desktop's 132% frame-to-avatar ratio, without a second ring.
+        val avatarSize = if (overlay != null) 48.dp / 1.32f else 38.dp
+        val avatarModifier = Modifier.size(avatarSize).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh)
+        Box(if (overlay == null) avatarModifier.border(1.5.dp, color, CircleShape) else avatarModifier, contentAlignment = Alignment.Center) {
             if (photo != null) Image(photo!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             else Icon(if (user) Icons.Default.Person else if (babe) Icons.Default.Favorite else Icons.Default.SmartToy, if (user) "You" else "AI", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
         }
