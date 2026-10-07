@@ -46,7 +46,7 @@ class WatchUiTest {
         compose.onNodeWithText("Project review").performClick()
         compose.waitUntil(10000) { compose.onAllNodesWithText("Review notes.").fetchSemanticsNodes().isNotEmpty() }
         screenshot("wear-light-chat.png")
-        compose.onNode(hasScrollAction()).performScrollToIndex(2)
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Checked notes."))
         screenshot("wear-light-summary.png")
         compose.runOnIdle { fixture.theme(true) }
         screenshot("wear-dark-summary.png")

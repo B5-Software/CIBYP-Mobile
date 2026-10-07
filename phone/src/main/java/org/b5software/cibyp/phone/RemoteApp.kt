@@ -28,6 +28,15 @@ class RemoteRepository(private val app: Application) {
     val sessions = MutableStateFlow<List<JSONObject>>(emptyList())
     val selected = MutableStateFlow("")
     val details = MutableStateFlow(JSONObject())
+    val loadingSession = MutableStateFlow(false)
+    val drafts = MutableStateFlow(runCatching {
+        val raw = JSONObject(vault.loadText("drafts-v1") ?: "{}")
+        raw.keys().asSequence().associateWith { ConversationDraft.from(raw.getJSONObject(it)) }
+    }.getOrElse { emptyMap() })
+    val sending = MutableStateFlow<Map<String, String>>(emptyMap())
+    private var draftSave: Job? = null
+    private val draftSaveLock = Mutex()
+    private val connectionGeneration = java.util.concurrent.atomic.AtomicLong()
     val todos = MutableStateFlow<List<JSONObject>>(emptyList())
     val usage = MutableStateFlow(JSONObject())
     val update = MutableStateFlow(JSONObject())
@@ -49,11 +58,13 @@ class RemoteRepository(private val app: Application) {
         prefs.edit().putStringSet("trusted-watches", trustedWatches.value).apply()
     }
     fun save(device: Device) {
+        devices.value.find { it.id == device.id }?.takeIf { it.url != device.url }?.let { clients.remove(device.id)?.close() }
         devices.value = devices.value.filterNot { it.id == device.id } + device
         vault.save(devices.value)
         publishDevices()
     }
     fun forget(device: Device) {
+        drafts.value = drafts.value.filterKeys { !it.startsWith(device.id + ":") }; persistDrafts()
         themeObservers.remove(device.id)
         clients.remove(device.id)?.close()
         devices.value = devices.value.filterNot { it.id == device.id }; vault.save(devices.value)
@@ -67,18 +78,23 @@ class RemoteRepository(private val app: Application) {
         Backend(device, socks).also { clients[device.id] = it }
     }
     suspend fun connect(device: Device, password: String = "", code: String = "") {
-        status.value = "Connecting…"; error.value = ""
+        val generation = connectionGeneration.incrementAndGet()
+        reconnect?.cancel(); refresh?.cancel()
+        status.value = "connecting"; error.value = ""
         val backend = client(device)
         if (password.isNotEmpty()) { backend.login(password, code); save(device.copy(token = backend.token)) }
         val snapshot = backend.snapshot()
-        if (active.value?.id != device.id) appearance.value = JSONObject()
+        if (connectionGeneration.get() != generation) throw CancellationException("Connection replaced")
+        if (active.value?.id != device.id) { appearance.value = JSONObject(); details.value = JSONObject(); selected.value = "" }
         active.value?.id?.takeIf { it != device.id }?.let { clients.remove(it)?.close() }
         active.value = devices.value.find { it.id == device.id } ?: device
         applySnapshot(snapshot)
         loadAppearance()
-        update.value = backend.rpc("ipc:invoke", JSONArray().put("updates:status")) as? JSONObject ?: JSONObject()
+        val nextUpdate = backend.rpc("ipc:invoke", JSONArray().put("updates:status")) as? JSONObject ?: JSONObject()
+        if (connectionGeneration.get() != generation) throw CancellationException("Connection replaced")
+        update.value = nextUpdate
         subscribe(backend)
-        status.value = "Connected"
+        status.value = "connected"
         RemoteWidget.update(app)
     }
     private fun applySnapshot(snapshot: JSONObject) {
@@ -90,7 +106,7 @@ class RemoteRepository(private val app: Application) {
         themeObservers.remove(backend.device.id)
         backend.subscribe(onEvent = { event -> scope.launch {
             try {
-            if (active.value?.id != backend.device.id) return@launch
+            if (active.value?.id != backend.device.id || clients[backend.device.id] !== backend) return@launch
             if (event.optString("type") == "reset") { applySnapshot(backend.snapshot()); loadAppearance() }
             if (event.optString("channel") == "updates:state") update.value = event.optJSONObject("payload") ?: JSONObject()
             if (event.optString("channel") == "agent:session-event" && event.optJSONObject("payload")?.optString("type") !in setOf("stream-chunk", "stream-start")) queueRefresh()
@@ -98,17 +114,25 @@ class RemoteRepository(private val app: Application) {
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { error.value = failure.message.orEmpty() }
         } }, onClosed = { expired -> scope.launch {
-            if (active.value?.id != backend.device.id) return@launch
+            if (active.value?.id != backend.device.id || clients[backend.device.id] !== backend) return@launch
             if (expired) { error.value = "Session expired; sign in again"; disconnect() }
             else {
-                status.value = "Reconnecting…"
+                status.value = "reconnecting"
                 reconnect?.cancel()
+                val generation = connectionGeneration.get()
                 reconnect = scope.launch {
-                    repeat(6) { attempt ->
-                        delay((500L shl attempt).coerceAtMost(10000))
-                        if (runCatching { applySnapshot(backend.snapshot()); loadAppearance(); subscribe(backend) }.isSuccess) { status.value = "Connected"; return@launch }
+                    var attempt = 0
+                    while (isActive && connectionGeneration.get() == generation && active.value?.id == backend.device.id) {
+                        delay((1000L shl attempt.coerceAtMost(5)).coerceAtMost(30000))
+                        try {
+                            val snapshot = backend.snapshot()
+                            if (connectionGeneration.get() != generation) return@launch
+                            applySnapshot(snapshot); loadAppearance(); subscribe(backend)
+                            status.value = "connected"; error.value = ""; return@launch
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (failure: BackendFailure) { if (failure.code == 401) { error.value = "Session expired; sign in again"; disconnect(); return@launch }; attempt++ }
+                        catch (_: Exception) { attempt++ }
                     }
-                    error.value = "Connection lost; reconnect from Devices"
                 }
             }
         } })
@@ -130,8 +154,10 @@ class RemoteRepository(private val app: Application) {
     suspend fun refreshNow() = refreshLock.withLock {
         val device = active.value ?: return@withLock
         val backend = client(device)
-        val key = selected.value
         val nextSessions = (backend.rpc("listSessions") as? JSONArray)?.objects().orEmpty().filter { it.optString("profile") != "settings-assistant" }
+        if (active.value?.id != device.id) return@withLock
+        if (nextSessions.none { it.optString("key") == selected.value }) { selected.value = nextSessions.firstOrNull()?.optString("key").orEmpty(); details.value = JSONObject() }
+        val key = selected.value
         val nextDetails = if (key.isNotEmpty()) backend.rpc("getSessionDetails", JSONArray().put(key)) as? JSONObject ?: JSONObject() else JSONObject()
         val nextTodos = (backend.rpc("getTodos") as? JSONArray)?.objects().orEmpty()
         if (active.value?.id == device.id) {
@@ -146,8 +172,11 @@ class RemoteRepository(private val app: Application) {
         try { block() } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error.value = failure.message.orEmpty() }
     }
-    suspend fun select(key: String) { selected.value = key; refreshNow() }
-    suspend fun newSession(mode: String) { val session = rpc("createSession", JSONArray().put(JSONObject().put("mode", mode))) as JSONObject; select(session.getString("key")) }
+    suspend fun select(key: String) {
+        selected.value = key; details.value = JSONObject(); loadingSession.value = true
+        try { refreshNow() } finally { if (selected.value == key) loadingSession.value = false }
+    }
+    suspend fun newSession(mode: String) { val device = active.value ?: error("Choose a device first"); val session = rpcFor(device, "createSession", JSONArray().put(JSONObject().put("mode", mode))) as JSONObject; if (active.value?.id == device.id) select(session.getString("key")) }
     suspend fun themeFor(device: Device): JSONObject {
         observeTheme(device)
         val state = client(device).rpc("getSystemTheme") as? JSONObject ?: JSONObject()
@@ -189,23 +218,47 @@ class RemoteRepository(private val app: Application) {
         if (appearance.value.toString() != next.toString()) appearance.value = next
         if (deviceThemes[device.id]?.toString() != theme.toString()) { deviceThemes[device.id] = theme; publishDevices() }
     }
-    fun send(text: String, attachments: JSONArray = JSONArray(), key: String = selected.value, device: Device? = active.value, onRejected: () -> Unit = {}) { scope.launch {
-        runCatching {
-            if (selected.value.isEmpty()) newSession("chat")
-            if (text.trim() == "/update") rpc("ipc:invoke", JSONArray().put("updates:start"))
+    fun draftKey(device: String, session: String) = "$device:$session"
+    fun setDraft(device: String, session: String, draft: ConversationDraft) {
+        val key = draftKey(device, session)
+        drafts.value = if (draft.text.isEmpty() && draft.attachments.isEmpty()) drafts.value - key else drafts.value + (key to draft)
+        persistDrafts()
+    }
+    fun persistDrafts(immediate: Boolean = false) {
+        draftSave?.cancel()
+        draftSave = scope.launch {
+            if (!immediate) delay(500)
+            draftSaveLock.withLock {
+                val value = JSONObject(drafts.value.mapValues { it.value.json() }).toString()
+                withContext(Dispatchers.IO) { vault.saveText("drafts-v1", value) }
+            }
+        }
+    }
+    suspend fun submit(text: String, attachments: JSONArray, key: String, device: Device) {
+            if (text.trim() == "/update") rpcFor(device, "ipc:invoke", JSONArray().put("updates:start"))
             else if (text.trim().startsWith("/compact") && attachments.length() == 0) {
-                val result = rpcFor(device ?: error("Choose a device first"), "agentAction", JSONArray().put(key).put("compactNow").put(JSONArray().put(text.trim().removePrefix("/compact").trim()))) as? JSONObject
+                val result = rpcFor(device, "agentAction", JSONArray().put(key).put("compactNow").put(JSONArray().put(text.trim().removePrefix("/compact").trim()))) as? JSONObject
                 val compact = result?.optJSONObject("result")
                 check(compact?.optBoolean("ok") == true) { compact?.optString("message") ?: "Compaction failed" }
             } else {
-                val result = rpcFor(device ?: error("Choose a device first"), "sendMessage", JSONArray().put(key).put(text).put(attachments)) as? JSONObject
+                val result = rpcFor(device, "submitMessage", JSONArray().put(key).put(text).put(attachments)) as? JSONObject
                 check(result?.optBoolean("ok") == true) { result?.optString("error") ?: "Message was not accepted" }
             }
-            refreshNow()
-        }.onFailure { onRejected(); error.value = it.message.orEmpty() }
-    } }
+            queueRefresh()
+    }
+    suspend fun history(mode: String, workspace: String = "") = (rpc("listHistory", JSONArray().put(mode).put(workspace)) as? JSONArray)?.objects().orEmpty()
+    suspend fun openHistory(mode: String, id: String, workspace: String = "") {
+        val device = active.value ?: error("Choose a device first")
+        sessions.value.find { it.optString("mode") == mode && it.optString("conversationId") == id && (workspace.isEmpty() || it.optString("workspacePath") == workspace) }?.let { select(it.getString("key")); return }
+        val entry = rpcFor(device, "createSession", JSONArray().put(JSONObject().put("mode", mode).apply { if (workspace.isNotEmpty()) put("workspacePath", workspace) })) as JSONObject
+        val key = entry.getString("key")
+        val result = rpcFor(device, "openHistory", JSONArray().put(key).put(id)) as? JSONObject
+        check(result?.optBoolean("ok") == true) { result?.optString("error") ?: "Conversation unavailable" }
+        if (active.value?.id == device.id) select(key)
+    }
     suspend fun loadUsage() { usage.value = rpc("getSubscriptionUsage", JSONArray().put(selected.value)) as? JSONObject ?: JSONObject() }
     fun disconnect() {
+        connectionGeneration.incrementAndGet()
         reconnect?.cancel(); refresh?.cancel()
         appearanceSerial.incrementAndGet()
         val old = active.value; active.value = null

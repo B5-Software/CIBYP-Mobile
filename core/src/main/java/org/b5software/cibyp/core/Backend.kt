@@ -8,6 +8,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import java.io.IOException
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -21,6 +27,7 @@ class Backend(val device: Device, socksPort: Int? = null) {
         if (onion) proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", socksPort!!)))
         connectTimeout(60, TimeUnit.SECONDS); readTimeout(0, TimeUnit.MILLISECONDS)
         followRedirects(false); followSslRedirects(false)
+        pingInterval(45, TimeUnit.SECONDS)
     }.build()
     @Volatile var token: String = device.token
     @Volatile private var socket: WebSocket? = null
@@ -33,11 +40,24 @@ class Backend(val device: Device, socksPort: Int? = null) {
             .apply { if (token.isNotEmpty()) header("Authorization", "Bearer $token") }
             .post(body.toString().toRequestBody("application/json".toMediaType())).build()
         val call = client.newCall(request)
-        if (body.optString("method") !in setOf("sendMessage", "inject")) call.timeout().timeout(120, TimeUnit.SECONDS)
-        call.execute().use { response ->
-            val value = JSONObject(response.body?.string() ?: "{}")
-            check(response.isSuccessful) { value.optString("error", "HTTP ${response.code}") }
-            check(!value.has("error")) { value.getString("error") }; value
+        call.timeout().timeout(if (body.optString("method") in setOf("sendMessage", "inject")) 600 else 120, TimeUnit.SECONDS)
+        suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, failure: IOException) { if (continuation.isActive) continuation.resumeWithException(failure) }
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val value = response.use {
+                            val raw = it.body?.string().orEmpty()
+                            val json = runCatching { JSONObject(raw) }.getOrNull()
+                            if (!it.isSuccessful) throw BackendFailure(it.code, json?.optString("error") ?: "HTTP ${it.code}")
+                            check(json != null) { "The backend returned an invalid response" }
+                            check(!json.has("error")) { json.getString("error") }; json
+                        }
+                        if (continuation.isActive) continuation.resume(value)
+                    } catch (failure: Exception) { if (continuation.isActive) continuation.resumeWithException(failure) }
+                }
+            })
         }
     }
     suspend fun login(password: String, code: String): String {
@@ -46,7 +66,12 @@ class Backend(val device: Device, socksPort: Int? = null) {
     }
     suspend fun rpc(method: String, args: JSONArray = JSONArray()): Any? {
         // Each logical request owns its ID; callers do not replay a mutation with a new ID.
-        val value = post("/api/rpc", JSONObject().put("id", "$clientId:${serial.incrementAndGet()}").put("method", method).put("args", args))
+        val body = JSONObject().put("id", "$clientId:${serial.incrementAndGet()}").put("method", method).put("args", args)
+        // The shared server deduplicates the same logical ID. Retry transport
+        // failures once, never credentials or application errors.
+        val value = try { post("/api/rpc", body) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: IOException) { delay(500); post("/api/rpc", body) }
         return value.opt("result").takeUnless { it == JSONObject.NULL }
     }
     suspend fun snapshot(): JSONObject {
@@ -73,3 +98,5 @@ class Backend(val device: Device, socksPort: Int? = null) {
     }
     fun close() { val previous = socket; socket = null; previous?.cancel(); client.dispatcher.cancelAll(); client.connectionPool.evictAll() }
 }
+
+class BackendFailure(val code: Int, message: String) : Exception(message)

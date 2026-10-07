@@ -33,4 +33,15 @@ class Vault(context: Context) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }
         return JSONArray(String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)))).objects().map(Device::from)
     }
+    @Synchronized fun saveText(name: String, text: String) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()); updateAAD(name.toByteArray()) }
+        val bytes = cipher.iv + cipher.doFinal(text.toByteArray())
+        check(prefs.edit().putString(name, Base64.encodeToString(bytes, Base64.NO_WRAP)).commit())
+    }
+    @Synchronized fun loadText(name: String): String? {
+        val raw = prefs.getString(name, null) ?: return null
+        val bytes = Base64.decode(raw, Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))); updateAAD(name.toByteArray()) }
+        return String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)))
+    }
 }

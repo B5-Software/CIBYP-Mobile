@@ -51,9 +51,9 @@ jobs:
         with:
           name: CIBYP-Android-WearOS
           path: artifacts
-      - name: Publish development MVP
+      - name: Publish development preview
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           find artifacts -name '*.apk' -exec sha256sum {} \; > SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" artifacts/phone/build/outputs/apk/debug/phone-debug.apk artifacts/wear/build/outputs/apk/release/wear-release.apk SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --prerelease --title "CIBYP Mobile $GITHUB_REF_NAME" --notes "Development MVP: phone and optimized watch APKs use the same public development signing identity. Install both together. Desktop commands run on your own CIBYP backend."
+          gh release create "$GITHUB_REF_NAME" artifacts/phone/build/outputs/apk/debug/phone-debug.apk artifacts/wear/build/outputs/apk/release/wear-release.apk SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --prerelease --title "CIBYP Mobile $GITHUB_REF_NAME" --notes "Development preview: conversation history, encrypted phone drafts, attachment transfers, task status and automatic reconnection. The optimized watch keeps bounded messages and shares devices through the phone. Both APKs use the same public development signing identity; install both together. Requires the current desktop backend."

@@ -14,12 +14,16 @@ object WatchPayload {
         else value.substring(0, value.offsetByCodePoints(0, limit)) + "…"
 
     fun sessions(value: JSONArray) = JSONArray(value.objects().filter { it.optString("profile") != "settings-assistant" }.takeLast(MAX_SESSIONS).map {
-        JSONObject().put("key", it.optString("key")).put("title", text(it.optString("title"), 80)).put("busy", it.optBoolean("busy"))
+        JSONObject().put("key", it.optString("key")).put("title", text(it.optString("title"), 80)).put("busy", it.optBoolean("busy")).put("mode", it.optString("mode")).put("status", it.optString("status")).put("workspacePath", text(it.optString("workspacePath"), 256)).put("conversationId", it.optString("conversationId"))
+    })
+    fun history(value: JSONArray) = JSONArray(value.objects().take(MAX_SESSIONS).map {
+        JSONObject().put("id", it.optString("id")).put("title", text(it.optString("title"), 80)).put("updatedAt", it.optString("updatedAt")).put("messageCount", it.optInt("messageCount"))
     })
 
     fun details(value: JSONObject): JSONObject {
-        val messages = value.array("messages").objects().filter { it.optString("role") in setOf("user", "assistant") }.takeLast(MAX_MESSAGES)
-        return JSONObject().put("messages", JSONArray(messages.mapIndexed { index, message ->
+        val full = value.array("messages").objects().filter { it.optString("role") in setOf("user", "assistant") }
+        val messages = full.takeLast(MAX_MESSAGES)
+        return JSONObject().put("earlierMessages", (full.size - messages.size).coerceAtLeast(0)).put("messages", JSONArray(messages.mapIndexed { index, message ->
             JSONObject().put("id", message.optString("id").ifEmpty { "${message.optString("role")}:$index" })
                 .put("role", message.optString("role")).put("content", text(message.optString("content")))
                 .put("truncated", message.optString("content").codePointCount(0, message.optString("content").length) > MAX_TEXT)
@@ -28,6 +32,7 @@ object WatchPayload {
                     JSONObject().put("name", text(it.optString("name"), 48)).put("type", text(it.optString("type"), 24))
                 }))
         })).apply {
+            value.optJSONObject("session")?.let { session -> put("session", JSONObject().put("busy", session.optBoolean("busy")).put("status", session.optString("status")).put("lastError", text(session.optString("lastError").takeUnless { session.isNull("lastError") }.orEmpty(), 240))) }
             value.optJSONObject("pendingInteraction")?.let { pending ->
                 val raw = pending.optJSONObject("payload") ?: JSONObject()
                 val payload = JSONObject()

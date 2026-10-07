@@ -24,6 +24,7 @@ class WatchBridgeService : WearableListenerService() {
                 check(repo.active.value != null) { "Connect from the phone first" }
                 var result = if (method == "appearance:theme") JSONObject().put("theme", repo.themeFor(device)) else repo.client(device).rpc(method, args)
                 if (method == "listSessions" && result is JSONArray) result = WatchPayload.sessions(result)
+                if (method == "listHistory" && result is JSONArray) result = WatchPayload.history(result)
                 if (method == "snapshot" && result is JSONObject) result = JSONObject().put("sessions", result.array("sessions")).put("boot", result.optJSONObject("boot")).put("platform", result.optString("platform"))
                 // Data Layer has a bounded payload. The watch shows recent output; the phone keeps the full transcript.
                 if (method == "getSessionDetails" && result is JSONObject) {
