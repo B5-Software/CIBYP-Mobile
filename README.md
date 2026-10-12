@@ -46,3 +46,7 @@ Tor runtime：Guardian Project tor-android；可插拔传输：IPtProxy（obfs4�
 Native Android and Wear OS companions for CIBYP. Connect to your own desktop backend over bundled Tor or private LAN/HTTPS. Pair and explicitly approve watches on the phone; credentials stay on the phone. Chat, stop, approvals, persistent todos, usage and desktop `/update` share the existing backend. The desktop keeps executing tasks when a client disconnects. See CI artifacts for development APKs; phone and watch require the same signing certificate.
 
 GPL-3.0-or-later. Third-party runtime notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## Remote v2 hardware
+
+The phone toolbar has Hardware Nodes for the active backend: paged summaries and resource grants fetched on demand. Wear OS reads at most 16 summaries through its approved phone, with manual refresh and no high-frequency telemetry. Operate hardware through chat so the shared Agent approval and lease rules apply. New backends validate interaction ID/revision atomically; older backends retain the existing conversation flow. Hardware discovery needs Remote v2 (current Desktop source or CIBYP Mini).

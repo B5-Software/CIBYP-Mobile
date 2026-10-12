@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
     var refreshing by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var historyMode by remember { mutableStateOf("chat") }
+    var hardware by remember(device) { mutableStateOf<List<JSONObject>>(emptyList()) }
     var voiceTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
     val scroll = androidx.compose.runtime.saveable.rememberSaveable(device, session, page, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
     val messages = remember(transcript) { transcript.array("messages").objects().filter { it.optString("role") != "system" } }
@@ -119,11 +120,22 @@ class MainActivity : ComponentActivity() {
                 "sessions" -> {
                     item { Button(enabled = !working, onClick = { action { session = (client.rpc(device, "createSession", JSONArray().put(JSONObject().put("mode", "chat"))) as JSONObject).getString("key"); refresh("chat"); page = "chat" } }) { Text(tr("新对话", "New chat")) } }
                     items(sessions, key = { it.optString("key") }) { entry -> Button(enabled = !working, onClick = { session = entry.getString("key"); action { refresh("chat"); page = "chat" } }) { Text(entry.optString("title").ifEmpty { tr("新对话", "New") }, maxLines = 2, overflow = TextOverflow.Ellipsis) } }
+                    item { Button(enabled = !working, onClick = { action { hardware = (client.rpc(device, "hardware:list") as? JSONArray)?.objects().orEmpty(); page = "hardware" } }) { Text(tr("硬件节点", "Hardware")) } }
                     item { Button(enabled = !working, onClick = { action { historyMode = "chat"; refresh("history"); page = "history" } }) { Text(tr("历史对话", "History")) } }
                     item { Button(onClick = { action { todos = (client.rpc(device, "getTodos") as? JSONArray)?.objects().orEmpty(); page = "todos" } }) { Text(tr("待办", "Todos")) } }
                     item { Button(onClick = { action { usage = client.rpc(device, "getSubscriptionUsage", JSONArray().put(session)) as? JSONObject ?: JSONObject(); page = "usage" } }) { Text(tr("用量", "Usage")) } }
                     item { Button(onClick = { action { client.rpc(device, "ipc:invoke", JSONArray().put("updates:start")) } }) { Text("/update") } }
                     if (update.optString("phase") == "ready") item { Button(onClick = { page = "install" }) { Text(tr("重启安装", "Install update")) } }
+                }
+                "hardware" -> {
+                    item { Text(tr("硬件节点", "Hardware"), style = MaterialTheme.typography.titleMedium) }
+                    if (hardware.isEmpty()) item { Text(tr("暂无节点", "No nodes")) }
+                    items(hardware, key = { it.optString("id") }, contentType = { "hardware" }) { node -> Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer, androidx.compose.foundation.shape.RoundedCornerShape(16.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(node.optString("label", node.optString("id")), style = MaterialTheme.typography.titleSmall)
+                        Text((if (node.optBoolean("online")) tr("在线", "Online") else tr("离线", "Offline")) + " · ${node.optInt("tools")} " + tr("工具", "tools"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } }
+                    item { Button(enabled = !working, onClick = { action { hardware = (client.rpc(device, "hardware:list") as? JSONArray)?.objects().orEmpty() } }) { Text(tr("刷新", "Refresh")) } }
+                    item { Text(tr("更多设备与授权详情请在手机查看", "View more nodes and permissions on your phone"), style = MaterialTheme.typography.labelSmall) }
                 }
                 "history" -> {
                     for (mode in listOf("chat", "code", "babe")) item { Button(enabled = !working, onClick = { action { historyMode = mode; refresh("history") } }) { Text(if (historyMode == mode) "✓ $mode" else mode) } }
@@ -161,9 +173,15 @@ class MainActivity : ComponentActivity() {
                         item { val payload = pending.optJSONObject("payload") ?: JSONObject(); Text(payload.optString("description", payload.optString("command", payload.optString("message", pending.optString("kind")))).take(2000)) }
                         if (pending.optString("kind") != "questions") item { Button(onClick = { action {
                             val kind = pending.optString("kind")
-                            client.rpc(device, "respond", JSONArray().put(session).put(if (kind == "tool-auth") "allow-once" else true)); refresh()
+                            val response = if (kind == "tool-auth") "allow-once" else true
+                            if (pending.optString("id").isNotEmpty()) client.rpc(device, "interaction:answer", JSONArray().put(JSONObject().put("sessionId", session).put("interactionId", pending.getString("id")).put("revision", pending.getLong("revision")).put("response", response).put("operationId", java.util.UUID.randomUUID().toString())))
+                            else client.rpc(device, "respond", JSONArray().put(session).put(response)); refresh()
                         } }) { Text(tr("允许一次", "Allow once")) } }
-                        item { Button(onClick = { action { client.rpc(device, "respond", JSONArray().put(session).put(if (pending.optString("kind") == "tool-auth") "deny" else false)); refresh() } }) { Text(tr("拒绝", "Deny")) } }
+                        item { Button(onClick = { action {
+                            val response = if (pending.optString("kind") == "tool-auth") "deny" else false
+                            if (pending.optString("id").isNotEmpty()) client.rpc(device, "interaction:answer", JSONArray().put(JSONObject().put("sessionId", session).put("interactionId", pending.getString("id")).put("revision", pending.getLong("revision")).put("response", response).put("operationId", java.util.UUID.randomUUID().toString())))
+                            else client.rpc(device, "respond", JSONArray().put(session).put(response)); refresh()
+                        } }) { Text(tr("拒绝", "Deny")) } }
                     }
                     item { Button(enabled = !working, onClick = { voiceTarget = device to session; voice.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)) }) { Text(tr("语音消息", "Speak")) } }
                     item { Button(onClick = { action { client.rpc(device, "stop", JSONArray().put(session)); refresh() } }) { Text(tr("停止任务", "Stop task")) } }

@@ -52,7 +52,9 @@ class Backend(val device: Device, socksPort: Int? = null) {
                             val json = runCatching { JSONObject(raw) }.getOrNull()
                             if (!it.isSuccessful) throw BackendFailure(it.code, json?.optString("error") ?: "HTTP ${it.code}")
                             check(json != null) { "The backend returned an invalid response" }
-                            check(!json.has("error")) { json.getString("error") }; json
+                            check(!json.has("error")) { json.optJSONObject("error")?.let { error ->
+                                "${error.optString("message")} (${error.optJSONObject("data")?.optString("reason").orEmpty()})"
+                            } ?: json.optString("error") }; json
                         }
                         if (continuation.isActive) continuation.resume(value)
                     } catch (failure: Exception) { if (continuation.isActive) continuation.resumeWithException(failure) }
@@ -77,6 +79,12 @@ class Backend(val device: Device, socksPort: Int? = null) {
     suspend fun snapshot(): JSONObject {
         val value = rpc("snapshot") as JSONObject
         sequence = value.optLong("sequence"); return value
+    }
+    suspend fun remote(method: String, params: JSONObject = JSONObject()): Any? {
+        val id = "$clientId:${serial.incrementAndGet()}"
+        val value = post("/remote/v2/rpc", JSONObject().put("jsonrpc", "2.0").put("id", id).put("method", method).put("params", params))
+        check(value.optString("id") == id) { "Mismatched Remote response" }
+        return value.opt("result").takeUnless { it == JSONObject.NULL }
     }
     fun subscribe(onEvent: (JSONObject) -> Unit, onClosed: (Boolean) -> Unit) {
         val previous = socket; socket = null; previous?.cancel()

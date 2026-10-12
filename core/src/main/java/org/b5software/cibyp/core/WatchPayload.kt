@@ -19,6 +19,10 @@ object WatchPayload {
     fun history(value: JSONArray) = JSONArray(value.objects().take(MAX_SESSIONS).map {
         JSONObject().put("id", it.optString("id")).put("title", text(it.optString("title"), 80)).put("updatedAt", it.optString("updatedAt")).put("messageCount", it.optInt("messageCount"))
     })
+    fun hardware(value: JSONArray) = JSONArray(value.objects().take(16).map {
+        JSONObject().put("id", text(it.optString("id"), 80)).put("label", text(it.optString("label"), 80)).put("online", it.optBoolean("online"))
+            .put("tools", it.optInt("toolCount", it.optJSONObject("policy")?.optJSONObject("tools")?.length() ?: 0))
+    })
 
     fun details(value: JSONObject): JSONObject {
         val full = value.array("messages").objects().filter { it.optString("role") in setOf("user", "assistant") }
@@ -37,7 +41,7 @@ object WatchPayload {
                 val raw = pending.optJSONObject("payload") ?: JSONObject()
                 val payload = JSONObject()
                 for (field in listOf("description", "command", "message")) raw.optString(field).takeIf { it.isNotEmpty() }?.let { payload.put(field, text(it, 240)) }
-                put("pendingInteraction", JSONObject().put("kind", pending.optString("kind")).put("payload", payload))
+                put("pendingInteraction", JSONObject().put("id", pending.optString("id")).put("revision", pending.optLong("revision")).put("kind", pending.optString("kind")).put("payload", payload))
             }
             value.optJSONObject("compaction")?.let { put("compaction", JSONObject().put("phase", it.optString("phase")).put("id", it.optString("id"))) }
         }

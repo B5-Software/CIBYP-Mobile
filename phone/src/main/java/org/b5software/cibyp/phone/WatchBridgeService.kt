@@ -22,7 +22,12 @@ class WatchBridgeService : WearableListenerService() {
                 WatchProtocol.validate(method, args)
                 val device = repo.devices.value.find { it.id == request.getString("device") } ?: error("Unknown device")
                 check(repo.active.value != null) { "Connect from the phone first" }
-                var result = if (method == "appearance:theme") JSONObject().put("theme", repo.themeFor(device)) else repo.client(device).rpc(method, args)
+                var result = when (method) {
+                    "appearance:theme" -> JSONObject().put("theme", repo.themeFor(device))
+                    "hardware:list" -> WatchPayload.hardware((repo.client(device).remote("device.page", JSONObject().put("limit", 16)) as? JSONObject)?.array("items") ?: JSONArray())
+                    "interaction:answer" -> repo.client(device).remote("interaction.answer", args.getJSONObject(0))
+                    else -> repo.client(device).rpc(method, args)
+                }
                 if (method == "listSessions" && result is JSONArray) result = WatchPayload.sessions(result)
                 if (method == "listHistory" && result is JSONArray) result = WatchPayload.history(result)
                 if (method == "snapshot" && result is JSONObject) result = JSONObject().put("sessions", result.array("sessions")).put("boot", result.optJSONObject("boot")).put("platform", result.optString("platform"))

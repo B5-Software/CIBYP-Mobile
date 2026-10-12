@@ -168,6 +168,22 @@ class RemoteRepository(private val app: Application) {
     }
     suspend fun rpcFor(deviceId: Device, method: String, args: JSONArray = JSONArray()): Any? = client(deviceId).rpc(method, args)
     suspend fun rpc(method: String, args: JSONArray = JSONArray()): Any? = client(active.value ?: error("Choose a device first")).rpc(method, args)
+    suspend fun hardware(target: Device): List<JSONObject> {
+        val result = mutableListOf<JSONObject>(); var offset = 0
+        do {
+            val page = client(target).remote("device.page", JSONObject().put("offset", offset).put("limit", 32)) as? JSONObject ?: error("Invalid device page")
+            result.addAll(page.array("items").objects())
+            offset = if (page.isNull("nextOffset")) -1 else page.optInt("nextOffset", -1)
+        } while (offset >= 0 && result.size < 128)
+        return result
+    }
+    suspend fun hardwareDetails(target: Device, id: String): JSONObject = client(target).remote("device.get", JSONObject().put("deviceId", id)) as? JSONObject ?: error("Device unavailable")
+    suspend fun answer(target: Device, session: String, pending: JSONObject, response: Any) {
+        if (pending.optString("id").isNotEmpty()) client(target).remote("interaction.answer", JSONObject()
+            .put("sessionId", session).put("interactionId", pending.getString("id")).put("revision", pending.getLong("revision"))
+            .put(if (pending.optString("kind") == "questions" && response is JSONArray) "answers" else "response", response).put("operationId", java.util.UUID.randomUUID().toString()))
+        else rpcFor(target, if (pending.optString("kind") == "questions" && response is JSONArray) "answerQuestions" else "respond", JSONArray().put(session).put(response))
+    }
     fun run(block: suspend () -> Unit) = scope.launch {
         try { block() } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error.value = failure.message.orEmpty() }

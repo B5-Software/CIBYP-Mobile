@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
     Scaffold(topBar = { TopAppBar(title = { Text(active?.name ?: "CIBYP", maxLines = 1) }, navigationIcon = {
         if (nav.currentBackStackEntryAsState().value?.destination?.route != "devices") IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("返回", "Back")) }
     }, actions = {
-        if (active != null) { IconButton(onClick = { action { repo.loadUsage(); usageOpen = true } }) { Icon(Icons.Default.DataUsage, tr("用量", "Usage")) }; IconButton(onClick = { nav.navigate("devices") { launchSingleTop = true } }) { Icon(Icons.Default.Devices, tr("设备", "Devices")) } }
+        if (active != null) { IconButton(onClick = { nav.navigate("hardware") { launchSingleTop = true } }) { Icon(Icons.Default.Memory, tr("硬件节点", "Hardware nodes")) }; IconButton(onClick = { action { repo.loadUsage(); usageOpen = true } }) { Icon(Icons.Default.DataUsage, tr("用量", "Usage")) }; IconButton(onClick = { nav.navigate("devices") { launchSingleTop = true } }) { Icon(Icons.Default.Devices, tr("设备", "Devices")) } }
     }) }, snackbarHost = { if (error.isNotEmpty()) Snackbar(action = { TextButton(onClick = { repo.error.value = "" }) { Text(tr("关闭", "Dismiss")) } }) { Text(error) } }) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (connection == "reconnecting") Surface(color = MaterialTheme.colorScheme.secondaryContainer) { Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) { Icon(Icons.Default.Sync, null); Text(tr("连接中断，正在重连。草稿已保留。", "Reconnecting. Your drafts are safe."), style = MaterialTheme.typography.bodySmall) } }
@@ -87,6 +87,7 @@ class MainActivity : ComponentActivity() {
                 composable("history") { History(repo) { nav.navigate("chat") } }
                 composable("chat") { Chat(repo) { installOpen = true } }
                 composable("todos") { Todos(repo) }
+                composable("hardware") { Hardware(repo) }
             }
             }
         }
@@ -356,13 +357,64 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Row {
-                TextButton(onClick = { repo.run { repo.rpcFor(device, "respond", JSONArray().put(sessionKey).put(if (kind == "tool-auth") "deny" else false)); repo.refreshNow() } }) { Text(tr("拒绝", "Deny")) }
+                TextButton(onClick = { repo.run { repo.answer(device, sessionKey, pending, if (kind == "tool-auth") "deny" else false); repo.refreshNow() } }) { Text(tr("拒绝", "Deny")) }
                 TextButton(onClick = { repo.run {
-                    if (kind == "questions") repo.rpcFor(device, "answerQuestions", JSONArray().put(sessionKey).put(JSONArray(answers.toList())))
-                    else repo.rpcFor(device, "respond", JSONArray().put(sessionKey).put(if (kind == "tool-auth") "allow-once" else true))
+                    repo.answer(device, sessionKey, pending, if (kind == "questions") JSONArray(answers.mapIndexed { index, answer -> JSONObject().put("question", questions[index].optString("question")).put("answer", answer) }) else if (kind == "tool-auth") "allow-once" else true)
                     repo.refreshNow()
                 } }) { Text(tr("确认", "Confirm")) }
             }
+        }
+    }
+}
+
+@Composable private fun Hardware(repo: RemoteRepository) {
+    val target by repo.active.collectAsState()
+    var nodes by remember(target?.id) { mutableStateOf<List<JSONObject>>(emptyList()) }
+    var loading by remember(target?.id) { mutableStateOf(false) }
+    var failure by remember(target?.id) { mutableStateOf("") }
+    var refresh by remember { mutableIntStateOf(0) }
+    LaunchedEffect(target?.id, refresh) {
+        val selected = target ?: return@LaunchedEffect
+        loading = true; failure = ""
+        try { nodes = repo.hardware(selected) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) { failure = error.message.orEmpty() }
+        finally { loading = false }
+    }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(tr("硬件节点", "Hardware nodes"), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            IconButton(enabled = !loading, onClick = { refresh++ }) { Icon(Icons.Default.Refresh, tr("刷新", "Refresh")) }
+        } }
+        item { Text(tr("显示当前后台已授权的设备与资源。让聊天 Agent 执行硬件操作，写入仍需审批。", "Authorized nodes and resources on this backend. Ask the chat Agent to operate hardware; writes still require approval."), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (loading) item { MotionProgress(Modifier.fillMaxWidth()) }
+        if (failure.isNotEmpty()) item { Text(failure, color = MaterialTheme.colorScheme.error) }
+        if (!loading && failure.isEmpty() && nodes.isEmpty()) item { Text(tr("还没有授权硬件节点。请在后台设置中配对设备。", "No hardware nodes. Pair a device in the backend settings.")) }
+        items(nodes, key = { it.getString("id") }) { node ->
+            var detail by remember(target?.id, node.getString("id")) { mutableStateOf<JSONObject?>(null) }
+            var detailBusy by remember(target?.id, node.getString("id")) { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
+            ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Memory, null)
+                    Text(node.optString("label", node.getString("id")), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Text(if (node.optBoolean("online")) tr("在线", "Online") else tr("离线", "Offline"), color = if (node.optBoolean("online")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("${node.optInt("toolCount")} " + tr("个授权工具", "authorized tools"), style = MaterialTheme.typography.bodySmall)
+                TextButton(enabled = !detailBusy, onClick = { val selected = target ?: return@TextButton; scope.launch {
+                    detailBusy = true
+                    try { detail = repo.hardwareDetails(selected, node.getString("id")) }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) { failure = error.message.orEmpty() }
+                    finally { detailBusy = false }
+                } }) { Text(tr("查看授权资源", "View authorized resources")) }
+                val tools = detail?.optJSONObject("policy")?.optJSONObject("tools") ?: JSONObject()
+                for (name in tools.keys().asSequence().sorted()) {
+                    val grant = tools.optJSONObject(name) ?: JSONObject()
+                    Text(name + " · " + if (grant.optBoolean("write")) tr("可写", "Write") else tr("只读", "Read only"), style = MaterialTheme.typography.labelLarge)
+                    Text(grant.array("resources").let { resources -> (0 until resources.length()).joinToString(" · ") { resources.optString(it) } }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } }
         }
     }
 }
